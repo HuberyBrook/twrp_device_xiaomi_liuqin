@@ -198,14 +198,13 @@ TW_FORCE_KEYMASTER_VER := true
 TW_USE_DMCTL := true
 
 # 界面
-# 面板 2880x1800（与 yudi 同分辨率，但为 11 英寸、标称 144Hz）。
-# 这版 TWRP（3.7.1，gui2/LVGL）没有 portrait/landscape 主题图片资源，界面按
-# 帧缓冲尺寸自适应布局：横屏与否取决于这里是否旋转。
-#   TW_ROTATION := 0   -> 帧缓冲 2880x1800，界面横屏
-#   TW_ROTATION := 270 -> 帧缓冲 1800x2880，界面竖屏
-# ⚠ 待验证：liuqin 的系统方向与触摸坐标系未实测，此处先按 yudi 的横屏方案。
-#   若上机后画面方向不对，按 90/180/270 依次试；若触摸位置与画面错位，
-#   配合 TW_SWAP_XY / RECOVERY_TOUCHSCREEN_SWAP_XY 调整。
+# 面板 2880x1800，但本机 DRM 的**首选模式是竖屏 1800x2880**（yudi 相反，首选
+# 2880x1800）。TWRP 选模式时按 DRM_MODE_TYPE_PREFERRED 走，所以：
+#   TW_ROTATION := 0   -> 帧缓冲 1800x2880，界面竖屏，触摸开箱即对 ← 当前采用
+#   TW_ROTATION := 90/270 -> 帧缓冲 2880x1800，界面横屏，但触摸坐标会有偏差
+#                            （只靠 ro.twrp.touch.rotation 校正不过来）
+# 横屏方案暂缓：需要额外做触摸坐标标定（minui 里只有纯旋转+换轴，见
+# twrpminui/twrp_input.cpp 的 vk_tp_to_screen）。先用竖屏交付可用版本。
 TW_THEME := portrait_hdpi
 TW_ROTATION := 0
 # 帧率。⚠ 待验证：Pad 6 Pro 标称 144Hz，但这里保守取 120：

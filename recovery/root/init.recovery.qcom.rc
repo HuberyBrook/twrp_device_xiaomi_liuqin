@@ -5,12 +5,12 @@
 # 服务定义来自原厂 vendor 的 rc 文件（recovery/root/vendor/etc/init/）。
 
 on early-init
-    # 触摸坐标系：TW_ROTATION := 0 只把界面按横屏渲染，不旋转输入，而触摸驱动
-    # 按竖屏坐标上报。TWRP 的 minui 认这个属性单独旋转触摸坐标
-    # （libtwrpminui 里的 ro.twrp.touch.rotation）。
-    # ⚠ 待上机验证：先照 yudi 的实测值 270。若触摸与画面对不上，按 90/180 依次试，
-    #   只改这一行即可（不需要动 TW_ROTATION，那是管界面的）。
-    setprop ro.twrp.touch.rotation 270
+    # 触摸坐标系：本机（Pad 6 Pro）面板 DRM 首选模式就是竖屏 1800x2880，
+    # TW_ROTATION := 0 时界面与触摸驱动坐标系一致，不需要任何旋转。
+    # 因此这里**不要**设 ro.twrp.touch.rotation：不设时 minui 的
+    # touch_rotation 保持 0，正是要的行为。
+    # （实测教训：一旦把界面转成横屏，这个属性只能做纯旋转+换轴，
+    #  救不了本机的坐标偏差，且 TWRP 会按 (属性值 - 界面旋转) 取差值。）
     # 原厂 recovery 同样在这里加载：ADSP 启动后，电池驱动才能拿到电量
     insmod /vendor/lib/modules/q6_pdr_dlkm.ko
     insmod /vendor/lib/modules/q6_notifier_dlkm.ko
