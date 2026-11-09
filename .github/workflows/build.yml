@@ -1,0 +1,237 @@
+name: TWRP 16 Builder
+
+on:
+  workflow_dispatch:
+    inputs:
+      TWRP_MANIFEST_URL:
+        description: "TWRP manifest url"
+        required: true
+        default: "https://github.com/TWRP-Test/platform_manifest_twrp_aosp"
+      TWRP_MANIFEST_BRANCH:
+        description: "TWRP branch"
+        required: true
+        default: "twrp-16.0"
+      DEVICE_TREE_URL:
+        description: "Device tree url"
+        required: true
+        default: "https://github.com/HuberyBrook/twrp_device_xiaomi_liuqin"
+      DEVICE_TREE_BRANCH:
+        description: "Device tree branch"
+        required: true
+        default: "twrp-16.0"
+      DEVICE_PATH:
+        description: "Device path device/"
+        required: true
+        default: "xiaomi/liuqin"
+      DEVICE_NAME:
+        description: "Device name"
+        required: true
+        default: "liuqin"
+      LUNCH_TARGET:
+        description: "lunch twrp_ (default same as device name)"
+        required: false
+        default: ""
+      BUILD_PARTITION:
+        description: "Build partition"
+        required: true
+        default: "recovery"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+    - name: Show build info
+      run: |
+        if [ -n "${{ github.event.inputs.LUNCH_TARGET }}" ]; then
+          echo "LUNCH_TARGET=${{ github.event.inputs.LUNCH_TARGET }}" >> "$GITHUB_ENV"
+        else
+          echo "LUNCH_TARGET=${{ github.event.inputs.DEVICE_NAME }}" >> "$GITHUB_ENV"
+        fi
+        {
+          echo 'BUILD_INFO<<EOF'
+          echo
+          echo Manifest url: ${{ github.event.inputs.TWRP_MANIFEST_URL }}
+          echo Manifest branch: ${{ github.event.inputs.TWRP_MANIFEST_BRANCH }}
+          echo Device tree url: ${{ github.event.inputs.DEVICE_TREE_URL }}
+          echo Device tree branch: ${{ github.event.inputs.DEVICE_TREE_BRANCH }}
+          echo Device path: ${{ github.event.inputs.DEVICE_PATH }}
+          echo Device name: ${{ github.event.inputs.DEVICE_NAME }}
+          echo Lunch target: ${{ github.event.inputs.LUNCH_TARGET }}
+          echo Build target: ${{ github.event.inputs.BUILD_PARTITION }}.img
+          echo Build date: `date`
+          echo
+          echo EOF
+        } >> "$GITHUB_ENV"
+        echo BUILD_DATE=`date +%F` >> "$GITHUB_ENV"
+        echo "REPO_NAME=$(basename ${{ github.event.inputs.TWRP_MANIFEST_URL }})" >> "$GITHUB_ENV"
+
+    - name: Cleanup
+      uses: rokibhasansagar/slimhub_actions@main
+
+    - name: Maximize build space
+      uses: easimon/maximize-build-space@master
+
+    - name: Setup ccache
+      uses: hendrikmuhs/ccache-action@v1.2
+      with:
+        create-symlink: true
+
+    - name: Setup zram
+      # 尽力而为：ubuntu-latest 的 Azure 内核可能没有对应的 linux-modules-extra 包，
+      # 原版模板会在这里直接失败（apt 退出码 100）。zram 只是加速手段，缺了也能编。
+      run: |
+        sudo apt install zram-tools -y || true
+        sudo modprobe zram || true
+        sudo sed -i 's/^#PERCENT=50/PERCENT=90/' /etc/default/zramswap || true
+        sudo sed -i 's/^#PRIORITY=100/PRIORITY=1000/' /etc/default/zramswap || true
+        sudo systemctl restart zramswap || true
+        zramctl || true
+
+    - name: Setup environment
+      run: |
+        export DEBIAN_FRONTEND=noninteractive
+        sudo apt update && sudo apt upgrade -y
+        sudo apt install repo -y
+        git config --global user.name ${{ github.actor }}
+        git config --global user.email ${{ github.actor }}@users.noreply.github.com
+
+    - name: Sync source
+      run: |
+        repo init -u ${{ github.event.inputs.TWRP_MANIFEST_URL }} -b ${{ github.event.inputs.TWRP_MANIFEST_BRANCH }} --depth=1
+        (while true; do echo "Syncing source..."; sleep 60; done) &
+        TIP_PID=$!
+        repo sync
+        kill $TIP_PID && exit 0
+
+    - name: Patch CTS platform releases
+      # 本树把 PLATFORM_VERSION_LAST_STABLE 设为 17，让 ro.build.version.release=17
+      # （KeyMint 据此判定 metadata key 是否需要升级，写小了会 -62 导致解密不可用）。
+      # CTS 的版本清单来自 android16.0.0_r1，没有 17，构建期 cts.mk 会中止，这里补一行。
+      run: |
+        echo 17 >> cts/tests/tests/os/assets/platform_releases.txt
+        tail -3 cts/tests/tests/os/assets/platform_releases.txt
+
+    - name: Patch gui2 performance
+      # 两项针对 2880x1800 软件渲染的优化。全部尽力而为：任何一项没匹配上只告警，
+      # 不会让构建失败（最坏情况就是回到上游默认行为）。
+      run: |
+        python3 - <<'PY'
+        import re, sys, pathlib
+
+        ok_all = True
+
+        # 1) LVGL 刷新周期：不依赖 TW_FRAMERATE 是否被传到 liblvgl_twrp 的编译单元，
+        #    直接把 lv_conf.h 的周期钉成 8ms（125fps 上限）。面板为 120Hz，
+        #    原来的 16ms 等于把 120Hz 屏幕按 62fps 用。
+        p = pathlib.Path("bootable/recovery/gui2/lv_conf.h")
+        if p.exists():
+            s = p.read_text()
+            s2 = re.sub(
+                r"#if defined\(TW_FRAMERATE\) && TW_FRAMERATE > 0\s*\n"
+                r"#define LV_DEF_REFR_PERIOD \(1000 / TW_FRAMERATE\)\s*\n"
+                r"#else\s*\n"
+                r"#define LV_DEF_REFR_PERIOD \d+\s*\n"
+                r"#endif",
+                "/* [liuqin] 钉死 8ms：面板 120Hz */\n#define LV_DEF_REFR_PERIOD 8",
+                s)
+            if s2 != s:
+                p.write_text(s2)
+                print("OK  lv_conf.h -> LV_DEF_REFR_PERIOD 8")
+            else:
+                ok_all = False
+                print("WARN lv_conf.h 未匹配，保持上游默认")
+        else:
+            ok_all = False
+            print("WARN 找不到 bootable/recovery/gui2/lv_conf.h")
+
+        # 2) 去掉非录屏状态下的整帧多余拷贝。
+        #    上游在 init 时无条件分配 20.7MB 的 recording_shadow_buffer，
+        #    flush_cb 里只判断 !empty() 就 memcpy，导致每帧白拷一次脏区域；
+        #    改成录屏时才懒分配，非录屏时 flush 直接跳过。
+        p = pathlib.Path("bootable/recovery/gui2/gui2_display.cpp")
+        if p.exists():
+            s = p.read_text()
+            a = "  recording_shadow_buffer.assign(static_cast<size_t>(width) * height * 4, 0);"
+            b = ("  // [liuqin] 不预分配 20.7MB：改为 submit_recording_frame 里按需分配，\n"
+                 "  // 避免非录屏时每帧对脏区域做一次无用的 memcpy。")
+            c = ("  if (recording_shadow_buffer.empty() || recording_shadow_width <= 0 ||\n"
+                 "      recording_shadow_height <= 0)\n"
+                 "    return;")
+            d = ("  if (recording_shadow_buffer.empty()) {\n"
+                 "    const int w = gr_fb_width();\n"
+                 "    const int h = gr_fb_height();\n"
+                 "    if (w > 0 && h > 0) {\n"
+                 "      recording_shadow_width = w;\n"
+                 "      recording_shadow_height = h;\n"
+                 "      recording_shadow_buffer.assign(static_cast<size_t>(w) * h * 4, 0);\n"
+                 "    }\n"
+                 "  }\n" + c)
+            if a in s and c in s:
+                s = s.replace(a, b)
+                s = s.replace(c, d, 1)
+                p.write_text(s)
+                print("OK  gui2_display.cpp -> 录屏缓冲改为懒分配")
+            else:
+                ok_all = False
+                print("WARN gui2_display.cpp 未匹配，保持上游行为")
+        else:
+            ok_all = False
+            print("WARN 找不到 bootable/recovery/gui2/gui2_display.cpp")
+
+        # 打印结果供构建日志核对
+        print("--- lv_conf.h ---")
+        for line in pathlib.Path("bootable/recovery/gui2/lv_conf.h").read_text().splitlines()[:16]:
+            print(line)
+        print("--- gui2_display.cpp 关键行 ---")
+        for i, line in enumerate(pathlib.Path("bootable/recovery/gui2/gui2_display.cpp").read_text().splitlines(), 1):
+            if "recording_shadow_buffer" in line or "liuqin" in line:
+                print(f"{i}: {line}")
+        sys.exit(0)
+        PY
+
+
+    - name: Setup device
+      run: |
+        git clone ${{ github.event.inputs.DEVICE_TREE_URL }} -b ${{ github.event.inputs.DEVICE_TREE_BRANCH }} device/${{ github.event.inputs.DEVICE_PATH }}
+
+    - name: Generate build info
+      run: |
+        echo -e "$BUILD_INFO" >> INFO.txt
+        echo "Change log:" >> INFO.txt
+        set +e
+        LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null)
+        if [ $? -eq 0 ]; then
+          git log "$LAST_TAG"..HEAD --pretty=format:"- %h-%an: %s" >> INFO.txt
+        else
+          git log --pretty=format:"- %h-%an: %s" >> INFO.txt
+        fi
+        cat INFO.txt
+      working-directory: device/${{ github.event.inputs.DEVICE_PATH }}
+
+    - name: Build TWRP
+      run: |
+        source build/envsetup.sh
+        export ALLOW_MISSING_DEPENDENCIES=true
+        export CCACHE_DIR=.ccache
+        export CCACHE_EXEC=$(command -v ccache)
+        export CCACHE_MAXSIZE=5G
+        export USE_CCACHE=1
+        lunch twrp_${{ env.LUNCH_TARGET }}
+        (while true; do echo `date +%T` "Building TWRP..."; free -h; sleep 10; done) &
+        TIP_PID=$!
+        m ${{ github.event.inputs.BUILD_PARTITION }}image
+        mv out/target/product/${{ github.event.inputs.DEVICE_NAME }}/${{ github.event.inputs.BUILD_PARTITION }}.img out/target/product/${{ github.event.inputs.DEVICE_NAME }}/TWRP-3.7.1-16-${{ github.event.inputs.DEVICE_NAME }}-${{ env.BUILD_DATE }}.img
+        kill $TIP_PID && exit 0
+
+    - name: Upload to Release
+      uses: softprops/action-gh-release@v2
+      with:
+        files: |
+          out/target/product/${{ github.event.inputs.DEVICE_NAME }}/TWRP-3.7.1-16-${{ github.event.inputs.DEVICE_NAME }}-${{ env.BUILD_DATE }}.img
+        name: TWRP-3.7.1-16-${{ github.event.inputs.DEVICE_NAME }}-${{ env.BUILD_DATE }}-${{ github.run_id }}
+        tag_name: ${{ env.BUILD_DATE }}-${{ github.run_id }}
+        body_path: device/${{ github.event.inputs.DEVICE_PATH }}/INFO.txt
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
